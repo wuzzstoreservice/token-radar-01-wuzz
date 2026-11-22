@@ -8,14 +8,16 @@
 //
 // Implied value follows only from the snapshot's own figures:
 //
-//   base       = tvl_usd x BASE_MULTIPLE
+//   multiple   = median(mcap_usd / tvl_usd) over the snapshot's live-token protocols in the same
+//                category (whole market's median when the category has fewer than MIN_COMPARABLES)
 //   growth     = clamp(change_7d, -60, 120) per cent
 //   growthMult = 1 + (growth / 100) x GROWTH_WEIGHT
 //   maturity   = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
-//   implied    = max(1, round(base x growthMult x maturity))
+//   implied    = max(1, round(tvl_usd x multiple x growthMult x maturity))
 //
-// The constants are the house model's, stated in the dashboard and changeable in the model sandbox. No
-// protocol name is ever special-cased: the same function scores every row.
+// The multiple is the market's own valuation of protocols of that kind, read from the snapshot and never
+// from a hand-written table of names. The constants are the house model's, stated in the dashboard and
+// changeable in the model sandbox. No protocol name is ever special-cased: the same function scores every row.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -50,6 +52,9 @@ export interface ModelConstants {
   maturity_range: number;
   maturity_days: number;
   unknown_age_days: number;
+  demand_floor: number;
+  demand_ceiling: number;
+  min_comparables: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -61,13 +66,16 @@ export const MODEL: ModelConstants = {
   maturity_range: 0.4,
   maturity_days: 1095,
   unknown_age_days: 365,
+  demand_floor: 0.05,
+  demand_ceiling: 5,
+  min_comparables: 3,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-1';
+export const MODEL_VERSION = 'radar-2';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
-export const EARLY_ROWS = 160;
+export const EARLY_ROWS = 220;
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -100,6 +108,8 @@ export interface BoardRow {
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
+    demand_multiplier: number;
+    multiple_basis: 'category' | 'market';
     age_days: number | null;
   };
   farm_steps: string[];
@@ -120,6 +130,8 @@ export interface RadarRow {
   implied_value_usd: number;
   growth_multiplier: number;
   maturity_multiplier: number;
+  demand_multiplier: number;
+  multiple_basis: string;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -140,6 +152,7 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
+  multiples: { market: number; samples: number; categories: number };
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -172,17 +185,77 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** The three multipliers and the implied value one protocol gets under `model`. */
-export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants): { implied: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
+/**
+ * The comparables the model prices a pre-token protocol with: the market's own multiple. For every
+ * category, the snapshot's live-token protocols in that category give a TVL-to-market-cap ratio
+ * (`mcap_usd / tvl_usd`); the median of those ratios is the multiple the market already pays for a
+ * protocol of that kind, read from the snapshot and never from a hand-written table. A category with
+ * too few live comparables falls back to the whole market's median.
+ */
+export interface MultipleTable {
+  /** category (lowercased) -> median multiple, for categories with enough comparables. */
+  byCategory: Map<string, number>;
+  /** The whole market's median multiple: the fallback. */
+  market: number;
+  /** How many live-token protocols the market median was taken from. */
+  samples: number;
+}
+
+/** The median of a list of numbers, or null when it is empty. */
+function median(xs: number[]): number | null {
+  if (xs.length === 0) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+
+/** The multiple table: the market's observed TVL-to-market-cap ratios, by category, from the snapshot. */
+export function buildMultiples(snapshot: Snapshot, model: ModelConstants): MultipleTable {
+  const all: number[] = [];
+  const byCat = new Map<string, number[]>();
+  for (const p of snapshot.protocols) {
+    if (p.mcap_usd === null || p.tvl_usd <= 0) continue;
+    const ratio = p.mcap_usd / p.tvl_usd;
+    if (!Number.isFinite(ratio) || ratio <= 0) continue;
+    all.push(ratio);
+    const key = (p.category ?? '').toLowerCase();
+    if (key === '') continue;
+    const list = byCat.get(key);
+    if (list === undefined) byCat.set(key, [ratio]);
+    else list.push(ratio);
+  }
+  const clamp = (m: number): number => Math.min(model.demand_ceiling, Math.max(model.demand_floor, m));
+  const market = clamp(median(all) ?? model.base_multiple);
+  const byCategory = new Map<string, number>();
+  for (const [key, list] of byCat) {
+    if (list.length < model.min_comparables) continue;
+    const m = median(list);
+    if (m !== null) byCategory.set(key, clamp(m));
+  }
+  return { byCategory, market, samples: all.length };
+}
+
+/** The multiple one protocol is priced at, and where it came from. */
+export function multipleFor(p: SnapshotProtocol, table: MultipleTable): { multiple: number; basis: 'category' | 'market' } {
+  const key = (p.category ?? '').toLowerCase();
+  const own = key === '' ? undefined : table.byCategory.get(key);
+  return own === undefined ? { multiple: table.market, basis: 'market' } : { multiple: own, basis: 'category' };
+}
+
+/** The four multipliers and the implied value one protocol gets under `model`. */
+export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants, table: MultipleTable): { implied: number; growthPct: number; growthMult: number; maturityMult: number; demandMult: number; basis: 'category' | 'market'; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const base = protocol.tvl_usd * model.base_multiple;
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
-  return { implied, growthPct, growthMult, maturityMult, age };
+  const { multiple, basis } = multipleFor(protocol, table);
+  // Round the multiple to four places before multiplying, so the board and the page (which reads the
+  // rounded figure from data.js) recompute the same implied value to the dollar.
+  const demandMult = Math.round(multiple * 1e4) / 1e4;
+  const implied = Math.max(1, Math.round(protocol.tvl_usd * demandMult * growthMult * maturityMult));
+  return { implied, growthPct, growthMult, maturityMult, demandMult, basis, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -212,7 +285,7 @@ export interface BoardSummary {
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, table: MultipleTable = buildMultiples(snapshot, model)): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug, even one the snapshot no longer carries (it cannot, but the
@@ -230,8 +303,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
-    const { implied, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model);
-    return { p, implied, growthPct, growthMult, maturityMult, age };
+    const { implied, growthPct, growthMult, maturityMult, demandMult, basis, age } = impliedValue(p, snapshot.as_of, model, table);
+    return { p, implied, growthPct, growthMult, maturityMult, demandMult, basis, age };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -254,6 +327,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
+      demand_multiplier: round4(s.demandMult),
+      multiple_basis: s.basis,
       age_days: s.age,
     },
     farm_steps: farmSteps(s.p, s.age).map(stepText),
@@ -317,6 +392,17 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const action = actionFor(p, capital, chain);
+  const c = (p.category ?? '').toLowerCase();
+  const weekly = c.includes('lend') || c.includes('cdp')
+    ? 'borrow a small amount against the deposit and repay it the same week, so both a supply and a borrow count.'
+    : c.includes('dex') || c.includes('yield')
+      ? 'swap a small amount through the pool you funded, so the position shows trading volume as well as liquidity.'
+      : c.includes('bridge')
+        ? 'send a small transfer back across the bridge once a week, so the route stays active.'
+        : c.includes('staking') || c.includes('restak')
+          ? 'claim and restake the rewards once a week, so the receipt keeps compounding.'
+          : 'make one qualifying action each week: a deposit, a swap, a borrow or a vote.';
+  const second = p.chains.length >= 2 ? p.chains[1]! : null;
   return [
     {
       text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
@@ -329,9 +415,11 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: '15 minutes to set up',
     },
     {
-      text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.`,
-      cost: 'about $2 of gas a week',
-      time: '10 minutes a week',
+      text: second === null
+        ? `Then each week ${weekly}`
+        : `Then repeat the position on ${second} too, so the activity counts on ${p.chains.length} chains, and each week ${weekly}`,
+      cost: second === null ? 'about $2 of gas a week' : 'about $4 of gas a week across both chains',
+      time: '10-20 minutes a week',
     },
     {
       text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
@@ -384,12 +472,15 @@ export function radarRow(row: BoardRow): RadarRow {
     implied_value_usd: row.implied_value_usd,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
+    demand_multiplier: row.model.demand_multiplier,
+    multiple_basis: row.model.multiple_basis,
   };
 }
 
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
+  const table = buildMultiples(snapshot, model);
+  const board = buildBoard(snapshot, model, table);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const radar: RadarData = {
@@ -398,6 +489,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
+    multiples: { market: Math.round(table.market * 1e4) / 1e4, samples: table.samples, categories: table.byCategory.size },
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
