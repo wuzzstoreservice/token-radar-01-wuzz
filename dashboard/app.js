@@ -97,47 +97,17 @@
     if (s.length < 20) s = s + " Hold the position and check the protocol's own page.";
     return s;
   }
-  function gasFor(chain) {
-    var c = (chain || '').toLowerCase();
-    if (c.indexOf('ethereum') >= 0) return 'about $4';
-    if (c.indexOf('arbitrum') >= 0 || c.indexOf('optimism') >= 0 || c.indexOf('base') >= 0 || c.indexOf('polygon') >= 0 || c.indexOf('unichain') >= 0 || c.indexOf('ink') >= 0 || c.indexOf('linea') >= 0 || c.indexOf('scroll') >= 0 || c.indexOf('blast') >= 0 || c.indexOf('mantle') >= 0 || c.indexOf('zksync') >= 0) return 'under $0.30';
-    if (c.indexOf('solana') >= 0 || c.indexOf('sui') >= 0 || c.indexOf('aptos') >= 0 || c.indexOf('near') >= 0) return 'under $0.05';
-    return 'about $1';
-  }
-
-  function riskNoteFor(p) {
-    var c = (p.category || '').toLowerCase();
-    if (c.indexOf('bridge') >= 0 || c.indexOf('canonical') >= 0) return 'bridges hold user funds in one contract, so read its audits and its current TVL before you bridge anything, and never bridge more than you would lose.';
-    if (c.indexOf('oracle') >= 0) return 'an oracle earns from being right, so check which feeds it serves and who pays for them before you stake or deposit anything.';
-    if (c.indexOf('cdp') >= 0 || c.indexOf('stable') >= 0) return 'a stable or CDP position can be liquidated, so keep the collateral ratio well above the minimum and watch the peg.';
-    if (c.indexOf('perpetual') >= 0 || c.indexOf('derivative') >= 0 || c.indexOf('leveraged') >= 0) return 'leverage liquidates, so size the position so a 30% move does not close it.';
-    if (c.indexOf('curator') >= 0 || c.indexOf('allocator') >= 0 || c.indexOf('risk') >= 0) return 'a curator allocates other people\'s capital, so read which vaults it runs and how its fee is charged before you deposit.';
-    return 'check the protocol\'s audits and its TVL trend on DefiLlama before you deposit, and start with the smallest position that still counts.';
-  }
-
-  function weeklyFor(p) {
-    var c = (p.category || '').toLowerCase();
-    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0) return 'borrow a small amount against the deposit and repay it the same week, so both a supply and a borrow count.';
-    if (c.indexOf('dex') >= 0 || c.indexOf('yield') >= 0) return 'swap a small amount through the pool you funded, so the position shows trading volume as well as liquidity.';
-    if (c.indexOf('bridge') >= 0) return 'send a small transfer back across the bridge once a week, so the route stays active.';
-    if (c.indexOf('staking') >= 0 || c.indexOf('restak') >= 0) return 'claim and restake the rewards once a week, so the receipt keeps compounding.';
-    return 'make a deposit, a swap, a borrow or a vote.';
-  }
-
   function farmSteps(p) {
     var chain = chainOf(p);
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
-    var second = p.chains && p.chains.length >= 2 ? p.chains[1] : null;
-    var weekly = 'Then each week ' + weeklyFor(p);
     return [
       { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
-      { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and ' + gasFor(chain) + ' of gas', time: '15 minutes to set up' },
-      { text: second === null ? weekly : 'Then repeat the position on ' + second + ' too, so the activity counts on ' + p.chains.length + ' chains, and each week ' + weeklyFor(p), cost: second === null ? gasFor(chain) + ' of gas a week' : gasFor(chain) + ' to ' + gasFor(second) + ' of gas a week across both chains', time: '10-20 minutes a week' },
+      { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' },
+      { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
       { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
       { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
-      { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' },
-      { text: 'Before you commit, ' + riskNoteFor(p), cost: 'no fee to read, and worth an hour', time: '30-60 minutes' }
+      { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
     ].map(stepText);
   }
 
@@ -228,11 +198,11 @@
     );
   }
 
-  function sortHeader(key, label) {
-    return el('th', { scope: 'col' },
+  function sortHeader(key, label, numeric) {
+    return el('th', { scope: 'col', class: numeric ? 'num' : null },
       el('button', { type: 'button', onclick: function () { if (state.sort === key) state.dir = -state.dir; else { state.sort = key; state.dir = -1; } render(); } },
         label,
-        state.sort === key ? el('span', { 'aria-hidden': 'true', text: state.dir < 0 ? ' v' : ' ^' }) : null
+        state.sort === key ? el('span', { 'aria-hidden': 'true', text: state.dir < 0 ? ' \u25BE' : ' \u25B4' }) : null
       )
     );
   }
@@ -281,12 +251,12 @@
         el('table', null,
           el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Select a row for its model and farm plan.' }),
           el('thead', null, el('tr', null,
-            sortHeader('implied', 'Rank'),
-            sortHeader('name', 'Protocol'),
-            sortHeader('tvl', 'TVL'),
-            sortHeader('growth', '7d'),
-            sortHeader('age', 'Age'),
-            sortHeader('implied', 'Implied value'),
+            el('th', { scope: 'col', class: 'num', text: 'Rank' }),
+            sortHeader('name', 'Protocol', false),
+            sortHeader('tvl', 'TVL', true),
+            sortHeader('growth', '7d', true),
+            sortHeader('age', 'Age', true),
+            sortHeader('implied', 'Implied value', true),
             el('th', { scope: 'col', text: 'Token' })
           )),
           tbody

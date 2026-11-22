@@ -426,26 +426,6 @@ function capitalFor(p: SnapshotProtocol): number {
   return 50;
 }
 
-/** A rough gas figure for one transaction on a chain, from the chain's own economics. */
-function gasFor(chain: string): string {
-  const c = chain.toLowerCase();
-  if (c.includes('ethereum')) return 'about $4';
-  if (c.includes('arbitrum') || c.includes('optimism') || c.includes('base') || c.includes('polygon') || c.includes('unichain') || c.includes('ink') || c.includes('linea') || c.includes('scroll') || c.includes('blast') || c.includes('mantle') || c.includes('zksync')) return 'under $0.30';
-  if (c.includes('solana') || c.includes('sui') || c.includes('aptos') || c.includes('near')) return 'under $0.05';
-  return 'about $1';
-}
-
-/** The risk a reader should check before committing capital, read from the protocol's own category. */
-function riskNoteFor(p: SnapshotProtocol): string {
-  const c = (p.category ?? '').toLowerCase();
-  if (c.includes('bridge') || c.includes('canonical')) return 'bridges hold user funds in one contract, so read its audits and its current TVL before you bridge anything, and never bridge more than you would lose.';
-  if (c.includes('oracle')) return 'an oracle earns from being right, so check which feeds it serves and who pays for them before you stake or deposit anything.';
-  if (c.includes('cdp') || c.includes('stable')) return 'a stable or CDP position can be liquidated, so keep the collateral ratio well above the minimum and watch the peg.';
-  if (c.includes('perpetual') || c.includes('derivative') || c.includes('leveraged')) return 'leverage liquidates, so size the position so a 30% move does not close it.';
-  if (c.includes('curator') || c.includes('allocator') || c.includes('risk')) return 'a curator allocates other people\'s capital, so read which vaults it runs and how its fee is charged before you deposit.';
-  return 'check the protocol\'s audits and its TVL trend on DefiLlama before you deposit, and start with the smallest position that still counts.';
-}
-
 /** How long to hold, from the protocol's age: younger protocols get a longer qualifying window. */
 function holdDaysFor(age: number | null): number {
   if (age === null) return 30;
@@ -489,7 +469,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
         ? 'send a small transfer back across the bridge once a week, so the route stays active.'
         : c.includes('staking') || c.includes('restak')
           ? 'claim and restake the rewards once a week, so the receipt keeps compounding.'
-          : 'make a deposit, a swap, a borrow or a vote.';
+          : 'make one qualifying action each week: a deposit, a swap, a borrow or a vote.';
   const second = p.chains.length >= 2 ? p.chains[1]! : null;
   return [
     {
@@ -499,14 +479,14 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
     },
     {
       text: action,
-      cost: `$${capital} of capital and ${gasFor(chain)} of gas`,
+      cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`,
       time: '15 minutes to set up',
     },
     {
       text: second === null
         ? `Then each week ${weekly}`
         : `Then repeat the position on ${second} too, so the activity counts on ${p.chains.length} chains, and each week ${weekly}`,
-      cost: second === null ? `${gasFor(chain)} of gas a week` : `${gasFor(chain)} to ${gasFor(second)} of gas a week across both chains`,
+      cost: second === null ? 'about $2 of gas a week' : 'about $4 of gas a week across both chains',
       time: '10-20 minutes a week',
     },
     {
@@ -523,11 +503,6 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
       cost: 'nothing but the log',
       time: '5 minutes',
-    },
-    {
-      text: `Before you commit, ${riskNoteFor(p)}`,
-      cost: 'no fee to read, and worth an hour',
-      time: '30-60 minutes',
     },
   ];
 }
