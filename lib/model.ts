@@ -55,6 +55,9 @@ export interface ModelConstants {
   demand_floor: number;
   demand_ceiling: number;
   min_comparables: number;
+  shrink_k: number;
+  momentum_floor: number;
+  momentum_ceiling: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -69,10 +72,13 @@ export const MODEL: ModelConstants = {
   demand_floor: 0.05,
   demand_ceiling: 5,
   min_comparables: 3,
+  shrink_k: 4,
+  momentum_floor: 0.8,
+  momentum_ceiling: 1.25,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 220;
@@ -110,6 +116,8 @@ export interface BoardRow {
     maturity_multiplier: number;
     demand_multiplier: number;
     multiple_basis: 'category' | 'market';
+    peer_growth: number;
+    peer_basis: 'category' | 'market';
     age_days: number | null;
   };
   farm_steps: string[];
@@ -132,6 +140,8 @@ export interface RadarRow {
   maturity_multiplier: number;
   demand_multiplier: number;
   multiple_basis: string;
+  peer_growth: number;
+  peer_basis: string;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -152,7 +162,13 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
-  multiples: { market: number; samples: number; categories: number };
+  multiples: {
+    market: number;
+    marketGrowth: number;
+    samples: number;
+    categories: number;
+    by_category: { category: string; multiple: number; samples: number; growth: number }[];
+  };
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -193,12 +209,18 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
  * too few live comparables falls back to the whole market's median.
  */
 export interface MultipleTable {
-  /** category (lowercased) -> median multiple, for categories with enough comparables. */
+  /** category (lowercased) -> shrunk median multiple, for categories with enough comparables. */
   byCategory: Map<string, number>;
-  /** The whole market's median multiple: the fallback. */
+  /** category (lowercased) -> the category's own median seven-day growth, for the peer comparison. */
+  growthByCategory: Map<string, number>;
+  /** The whole market's median multiple: the fallback every category shrinks toward. */
   market: number;
-  /** How many live-token protocols the market median was taken from. */
+  /** The whole market's median seven-day growth, the fallback for the peer comparison. */
+  marketGrowth: number;
+  /** How many live-token protocols the medians were taken from. */
   samples: number;
+  /** The category table in display order, for the dashboard's multiples panel. */
+  categories: { category: string; multiple: number; samples: number; growth: number }[];
 }
 
 /** The median of a list of numbers, or null when it is empty. */
@@ -212,13 +234,23 @@ function median(xs: number[]): number | null {
 /** The multiple table: the market's observed TVL-to-market-cap ratios, by category, from the snapshot. */
 export function buildMultiples(snapshot: Snapshot, model: ModelConstants): MultipleTable {
   const all: number[] = [];
+  const allGrowth: number[] = [];
   const byCat = new Map<string, number[]>();
+  const growthByCat = new Map<string, number[]>();
   for (const p of snapshot.protocols) {
+    const key = (p.category ?? '').toLowerCase();
+    if (p.change_7d !== null && Number.isFinite(p.change_7d)) {
+      allGrowth.push(p.change_7d);
+      if (key !== '') {
+        const g = growthByCat.get(key);
+        if (g === undefined) growthByCat.set(key, [p.change_7d]);
+        else g.push(p.change_7d);
+      }
+    }
     if (p.mcap_usd === null || p.tvl_usd <= 0) continue;
     const ratio = p.mcap_usd / p.tvl_usd;
     if (!Number.isFinite(ratio) || ratio <= 0) continue;
     all.push(ratio);
-    const key = (p.category ?? '').toLowerCase();
     if (key === '') continue;
     const list = byCat.get(key);
     if (list === undefined) byCat.set(key, [ratio]);
@@ -226,13 +258,31 @@ export function buildMultiples(snapshot: Snapshot, model: ModelConstants): Multi
   }
   const clamp = (m: number): number => Math.min(model.demand_ceiling, Math.max(model.demand_floor, m));
   const market = clamp(median(all) ?? model.base_multiple);
+  const marketGrowth = median(allGrowth) ?? 0;
   const byCategory = new Map<string, number>();
+  const growthByCategory = new Map<string, number>();
+  const categories: { category: string; multiple: number; samples: number; growth: number }[] = [];
+  // The growth benchmark stands on its own: every protocol in a category reports seven-day growth, so a
+  // category can have a peer benchmark even when too few of its members trade to price a multiple.
+  for (const [key, list] of growthByCat) {
+    if (list.length < model.min_comparables) continue;
+    const g = median(list);
+    if (g !== null) growthByCategory.set(key, g);
+  }
   for (const [key, list] of byCat) {
     if (list.length < model.min_comparables) continue;
-    const m = median(list);
-    if (m !== null) byCategory.set(key, clamp(m));
+    const own = median(list);
+    if (own === null) continue;
+    // Shrink the category's own median toward the market's, by how few comparables it has: a category
+    // with three peers keeps most of its own signal, one with thirty keeps nearly all of it.
+    const n = list.length;
+    const shrunk = (n * own + model.shrink_k * market) / (n + model.shrink_k);
+    byCategory.set(key, clamp(shrunk));
+    const g = growthByCategory.get(key) ?? marketGrowth;
+    categories.push({ category: key, multiple: clamp(shrunk), samples: n, growth: g });
   }
-  return { byCategory, market, samples: all.length };
+  categories.sort((a, b) => b.multiple - a.multiple || (a.category < b.category ? -1 : 1));
+  return { byCategory, growthByCategory, market, marketGrowth, samples: all.length, categories };
 }
 
 /** The multiple one protocol is priced at, and where it came from. */
@@ -242,12 +292,28 @@ export function multipleFor(p: SnapshotProtocol, table: MultipleTable): { multip
   return own === undefined ? { multiple: table.market, basis: 'market' } : { multiple: own, basis: 'category' };
 }
 
+/** The peers a protocol is measured against: its category's median growth, or the whole market's. */
+export function peerGrowthFor(p: SnapshotProtocol, table: MultipleTable): { growth: number; basis: 'category' | 'market' } {
+  const key = (p.category ?? '').toLowerCase();
+  const own = key === '' ? undefined : table.growthByCategory.get(key);
+  return own === undefined ? { growth: table.marketGrowth, basis: 'market' } : { growth: own, basis: 'category' };
+}
+
 /** The four multipliers and the implied value one protocol gets under `model`. */
-export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants, table: MultipleTable): { implied: number; growthPct: number; growthMult: number; maturityMult: number; demandMult: number; basis: 'category' | 'market'; age: number | null } {
+export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants, table: MultipleTable): { implied: number; growthPct: number; growthMult: number; maturityMult: number; demandMult: number; basis: 'category' | 'market'; peerGrowth: number; peerBasis: 'category' | 'market'; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
+  const { growth: peerRaw, basis: peerBasis } = peerGrowthFor(protocol, table);
+  // Round the peer benchmark to four places, the figure data.js carries, so the page's own recompute
+  // lands on the same dollar as the board.
+  const peerGrowth = Math.round(peerRaw * 1e4) / 1e4;
+  // Momentum is measured against the protocol's peers, not against zero: a lending protocol down 2%
+  // while its category is down 6% is gaining ground, and the model should say so. The peer-relative
+  // spread is clamped, then multiplied in, so one wild week cannot swamp the valuation.
+  const peerSpread = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth - peerGrowth));
+  const momentumMult = Math.min(model.momentum_ceiling, Math.max(model.momentum_floor, 1 + (peerSpread / 100) * model.growth_weight));
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
+  const growthMult = momentumMult;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
   const { multiple, basis } = multipleFor(protocol, table);
@@ -255,7 +321,7 @@ export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: Mo
   // rounded figure from data.js) recompute the same implied value to the dollar.
   const demandMult = Math.round(multiple * 1e4) / 1e4;
   const implied = Math.max(1, Math.round(protocol.tvl_usd * demandMult * growthMult * maturityMult));
-  return { implied, growthPct, growthMult, maturityMult, demandMult, basis, age };
+  return { implied, growthPct, growthMult, maturityMult, demandMult, basis, peerGrowth, peerBasis, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -303,8 +369,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, ta
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
-    const { implied, growthPct, growthMult, maturityMult, demandMult, basis, age } = impliedValue(p, snapshot.as_of, model, table);
-    return { p, implied, growthPct, growthMult, maturityMult, demandMult, basis, age };
+    const { implied, growthPct, growthMult, maturityMult, demandMult, basis, peerGrowth, peerBasis, age } = impliedValue(p, snapshot.as_of, model, table);
+    return { p, implied, growthPct, growthMult, maturityMult, demandMult, basis, peerGrowth, peerBasis, age };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -329,6 +395,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, ta
       maturity_multiplier: round4(s.maturityMult),
       demand_multiplier: round4(s.demandMult),
       multiple_basis: s.basis,
+      peer_growth: round4(s.peerGrowth),
+      peer_basis: s.peerBasis,
       age_days: s.age,
     },
     farm_steps: farmSteps(s.p, s.age).map(stepText),
@@ -474,6 +542,8 @@ export function radarRow(row: BoardRow): RadarRow {
     maturity_multiplier: row.model.maturity_multiplier,
     demand_multiplier: row.model.demand_multiplier,
     multiple_basis: row.model.multiple_basis,
+    peer_growth: row.model.peer_growth,
+    peer_basis: row.model.peer_basis,
   };
 }
 
@@ -489,7 +559,18 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
-    multiples: { market: Math.round(table.market * 1e4) / 1e4, samples: table.samples, categories: table.byCategory.size },
+    multiples: {
+      market: Math.round(table.market * 1e4) / 1e4,
+      marketGrowth: Math.round(table.marketGrowth * 1e4) / 1e4,
+      samples: table.samples,
+      categories: table.byCategory.size,
+      by_category: table.categories.map((c) => ({
+        category: c.category,
+        multiple: Math.round(c.multiple * 1e4) / 1e4,
+        samples: c.samples,
+        growth: Math.round(c.growth * 1e4) / 1e4,
+      })),
+    },
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,

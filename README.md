@@ -11,15 +11,19 @@ gives each one a farm plan a reader can follow.
 
 ## The value model
 
-`implied = round( tvl_usd x multiple x (1 + clamp(change_7d, -60, 120)/100 x 0.5) x (0.6 + min(age_days,1095)/1095 x 0.4) )`
+`implied = round( tvl_usd x multiple x momentum x (0.6 + min(age_days,1095)/1095 x 0.4) )`
 
-The `multiple` is the market's own valuation, read from the snapshot and never from a hand-written
-table: for each category it is the **median `mcap_usd / tvl_usd`** over that category's live-token
-protocols (falling back to the whole market's median when a category has fewer than three
-comparables, which is 128 live protocols across 14 categories in this snapshot).
+Both factors are read from the snapshot, never from a hand-written table:
 
-So the model prices a pre-token protocol the way the market already prices its peers, then adjusts
-for seven-day growth and for how long the protocol has run with no token at all.
+- **multiple** — the market's TVL-to-market-cap ratio for the protocol's category: the median over
+  that category's live-token protocols, shrunk toward the whole market's median (128 live protocols,
+  14 categories) in proportion to how few peers the category has.
+- **momentum** — `1 + clamp(change_7d - peer_7d, -60, 120)/100 x 0.5`, held in `[0.8, 1.25]`, where
+  `peer_7d` is the protocol's category median seven-day growth. A protocol is measured against its
+  peers, not against zero: losing 2% while its category loses 8% counts as gaining ground.
+
+So the model prices a pre-token protocol the way the market already prices its peers, then adjusts for
+whether it is outgrowing them and for how long it has run with no token at all.
 
 ## Run it
 

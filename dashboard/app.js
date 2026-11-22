@@ -29,12 +29,15 @@
   // The model in one function: the page recomputes a row from the snapshot figures and checks the
   // number board.json carries, so the page's code and the board's data are visibly the same arithmetic.
   function impliedOf(row, model) {
-    var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
-    var growthMult = 1 + (growth / 100) * model.growth_weight;
+    // Momentum is peer-relative: the row's own seven-day change minus its category's median, clamped.
+    var peer = row.peer_growth === null || row.peer_growth === undefined ? 0 : row.peer_growth;
+    var own = row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d;
+    var spread = Math.min(model.growth_cap, Math.max(model.growth_floor, own - peer));
+    var momentum = Math.min(model.momentum_ceiling, Math.max(model.momentum_floor, 1 + (spread / 100) * model.growth_weight));
     var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
     var maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
     var demand = row.demand_multiplier === null || row.demand_multiplier === undefined ? 1 : row.demand_multiplier;
-    return Math.max(1, Math.round(row.tvl_usd * demand * growthMult * maturity));
+    return Math.max(1, Math.round(row.tvl_usd * demand * momentum * maturity));
   }
 
   function el(tag, attrs) {
@@ -285,15 +288,45 @@
     );
   }
 
+  function categoryTable() {
+    var cats = (DATA.multiples.by_category || []).slice(0, 10);
+    if (cats.length === 0) return null;
+    var rows = cats.map(function (c) {
+      return el('tr', null,
+        el('td', null, el('span', { class: 'chip', text: c.category })),
+        el('td', { class: 'num', text: String(c.multiple) }),
+        el('td', { class: 'num', text: fmtPct(c.growth) }),
+        el('td', { class: 'num', text: String(c.samples) })
+      );
+    });
+    return el('div', { class: 'cat-table' },
+      el('h3', { text: "The market's multiples, by category" }),
+      el('p', { class: 'sub', text: 'Read from the snapshot\'s live-token protocols: the median market-cap-to-TVL ratio the market already pays for each kind of protocol, and that category\'s median seven-day growth, the benchmark each row is measured against.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('thead', null, el('tr', null,
+            el('th', { text: 'Category' }),
+            el('th', { text: 'Multiple' }),
+            el('th', { text: 'Median 7d' }),
+            el('th', { text: 'Peers' })
+          )),
+          el('tbody', null, rows)
+        )
+      )
+    );
+  }
+
   function modelPanel() {
     var m = DATA.model;
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )',
-        " multiple is the market's own TVL-to-market-cap ratio, taken as the median over " + DATA.multiples.samples + " live-token protocols in the snapshot (" + DATA.multiples.categories + " categories), by the protocol's category where it has at least " + m.min_comparables + " comparables and the whole market's median (" + DATA.multiples.market + ") otherwise. No protocol name is special-cased."
+        'implied = round( tvl_usd x multiple x momentum x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )',
+        " multiple = the market's TVL-to-market-cap ratio for the protocol's category: the median over that category's live-token protocols, shrunk toward the whole market's median (" + DATA.multiples.market + ", taken over " + DATA.multiples.samples + " live protocols) by how few peers the category has.",
+        " momentum = 1 + clamp(change_7d - peer_7d, " + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ', held between ' + m.momentum_floor + ' and ' + m.momentum_ceiling + ": a protocol is measured against its category's own median growth, never against zero, so losing 2% while peers lose 6% counts as gaining ground."
       ),
+      categoryTable(),
       el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. The early radar is every pre-token protocol below the watchlist floor, by TVL, and the live-token protocols are set aside with their market caps shown.' })
     );
   }
@@ -322,7 +355,8 @@
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
-        el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
+        el('div', null, el('span', { text: 'Momentum (vs peers)' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
+        el('div', null, el('span', { text: 'Peer 7d growth' }), el('b', { class: 'num', text: fmtPct(row.peer_growth) + (row.peer_basis === 'category' ? ' (this category)' : ' (whole market)') })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Market multiple' }), el('b', { class: 'num', text: String(row.demand_multiplier) + (row.multiple_basis === 'category' ? ' (this category)' : ' (whole market)') })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
