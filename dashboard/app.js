@@ -198,8 +198,8 @@
     );
   }
 
-  function sortHeader(key, label, numeric) {
-    return el('th', { scope: 'col', class: numeric ? 'num' : null },
+  function sortHeader(key, label) {
+    return el('th', { scope: 'col' },
       el('button', { type: 'button', onclick: function () { if (state.sort === key) state.dir = -state.dir; else { state.sort = key; state.dir = -1; } render(); } },
         label,
         state.sort === key ? el('span', { 'aria-hidden': 'true', text: state.dir < 0 ? ' \u25BE' : ' \u25B4' }) : null
@@ -252,11 +252,11 @@
           el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Select a row for its model and farm plan.' }),
           el('thead', null, el('tr', null,
             el('th', { scope: 'col', class: 'num', text: 'Rank' }),
-            sortHeader('name', 'Protocol', false),
-            sortHeader('tvl', 'TVL', true),
-            sortHeader('growth', '7d', true),
-            sortHeader('age', 'Age', true),
-            sortHeader('implied', 'Implied value', true),
+            sortHeader('name', 'Protocol'),
+            sortHeader('tvl', 'TVL'),
+            sortHeader('growth', '7d'),
+            sortHeader('age', 'Age'),
+            sortHeader('implied', 'Implied value'),
             el('th', { scope: 'col', text: 'Token' })
           )),
           tbody
